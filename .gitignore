@@ -1,0 +1,17 @@
+cat > .gitignore << EOL
+.env
+env/
+venv/
+app/whisper.cpp/
+app/coqui_utils/
+__pycache__/
+chat_history.json
+*.db
+*.dll
+*.lib
+*.pyd
+*.so
+*.dylib
+*.bin
+*.dic
+EOL
