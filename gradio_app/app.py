@@ -4,131 +4,157 @@ import requests
 import gradio as gr
 import scipy.io.wavfile
 import time
-import shutil
+import numpy as np
+import base64
+
+# Konfigurasi API endpoint
+API_URL = "http://localhost:8000/voice-chat"
+
+def decode_base64(b64_text):
+    """Decode teks base64 ke UTF-8"""
+    if not b64_text:
+        return ""
+    try:
+        return base64.b64decode(b64_text).decode('utf-8')
+    except:
+        return "Error: Tidak dapat mendekode teks"
 
 def voice_chat(audio):
+    """
+    Fungsi utama untuk mengirimkan audio ke API dan mendapatkan respons
+    """
     if audio is None:
-        return None
+        return None, "Silakan rekam audio terlebih dahulu", ""
     
+    # Dapatkan data audio
     sr, audio_data = audio
     audio_path = None
-    output_audio_path = None
-
+    
     try:
-        # simpan sebagai .wav dengan suffix unik
+        # Simpan audio ke file sementara
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
             scipy.io.wavfile.write(tmpfile.name, sr, audio_data)
             audio_path = tmpfile.name
         
-        print(f"Audio saved to temporary file: {audio_path}")
+        print(f"Audio disimpan di: {audio_path}")
         
-        # Tambahkan delay untuk memastikan file disimpan dengan benar
-        time.sleep(0.5)
-        
-        # kirim ke endpoint FastAPI dengan timeout dan error handling
+        # Kirim ke API
         with open(audio_path, "rb") as f:
             files = {"file": ("voice.wav", f, "audio/wav")}
-            
-            # Tambahkan timeout dan pengaturan lain untuk request
-            response = requests.post(
-                "http://localhost:8000/voice-chat", 
-                files=files,
-                timeout=500  
-            )
+            response = requests.post(API_URL, files=files, timeout=500)
         
-        print(f"API response status: {response.status_code}")
-        print(f"API response headers: {response.headers}")
+        print(f"Status respons API: {response.status_code}")
         
         if response.status_code == 200:
-            # Membuat file output dengan nama yang unik untuk menghindari konflik
-            timestamp = int(time.time())
-            output_dir = os.path.join(tempfile.gettempdir(), "gradio_outputs")
+            # Simpan respons audio
+            output_dir = os.path.join(tempfile.gettempdir(), "voice_chat_output")
             os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, f"response_{int(time.time())}.wav")
             
-            output_audio_path = os.path.join(output_dir, f"response_{timestamp}.wav")
-            
-            # Simpan response content ke file output
-            with open(output_audio_path, "wb") as f:
+            with open(output_path, "wb") as f:
                 f.write(response.content)
             
-            print(f"Response audio saved to: {output_audio_path}")
+            # Dapatkan teks dari header base64
+            transcription_b64 = response.headers.get("X-Transcription-Base64", "")
+            response_text_b64 = response.headers.get("X-Response-Text-Base64", "")
             
-            # Verifikasi file output
-            if os.path.exists(output_audio_path) and os.path.getsize(output_audio_path) > 0:
-                print(f"File verified: {output_audio_path}, size: {os.path.getsize(output_audio_path)} bytes")
-                
-                # Tambahkan delay untuk memastikan sistem file telah memperbarui informasi file
-                time.sleep(0.5)
-                
-                return output_audio_path
-            else:
-                print(f"File verification failed: {output_audio_path}")
-                if os.path.exists(output_audio_path):
-                    print(f"File exists but size is: {os.path.getsize(output_audio_path)} bytes")
-                else:
-                    print("File does not exist")
-                return None
+            # Decode base64
+            transcription = decode_base64(transcription_b64)
+            response_text = decode_base64(response_text_b64)
+            
+            # Jika header base64 tidak tersedia, coba dengan header biasa (kompatibilitas mundur)
+            if not transcription:
+                transcription = response.headers.get("X-Transcription", "Transcription tidak tersedia")
+            if not response_text:
+                response_text = response.headers.get("X-Response-Text", "Response text tidak tersedia")
+            
+            return output_path, transcription, response_text
         else:
-            print(f"Error response: {response.text}")
-            return None
+            error_msg = f"Error: API mengembalikan status {response.status_code}"
+            try:
+                error_msg += f" - {response.json().get('message', '')}"
+            except:
+                error_msg += f" - {response.text}"
+            return None, error_msg, ""
             
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"Exception occurred: {e}")
-        return None
+        print(f"Terjadi kesalahan: {e}")
+        return None, f"Error: {str(e)}", ""
     finally:
-        # Bersihkan file temporary input audio
+        # Hapus file sementara
         if audio_path and os.path.exists(audio_path):
             try:
                 os.unlink(audio_path)
-                print(f"Temporary input file deleted: {audio_path}")
-            except Exception as e:
-                print(f"Failed to delete temporary input file: {e}")
+            except:
+                pass
 
-# UI Gradio dengan pesan error yang lebih jelas
-with gr.Blocks() as demo:
+# Buat UI Gradio
+with gr.Blocks(title="Voice Chatbot") as demo:
     gr.Markdown("# 🎙️ Voice Chatbot")
-    gr.Markdown("Berbicara langsung ke mikrofon dan dapatkan jawaban suara dari asisten AI.")
-
+    gr.Markdown("Rekam pertanyaan Anda dan dapatkan respons suara dari asisten AI")
+    
     with gr.Row():
+        # Panel input
         with gr.Column():
-            audio_input = gr.Audio(sources="microphone", type="numpy", label="🎤 Rekam Pertanyaan Anda")
-            submit_btn = gr.Button("🔁 Submit")
-        with gr.Column():
-            audio_output = gr.Audio(type="filepath", label="🔊 Balasan dari Asisten")
-            error_output = gr.Textbox(label="Status", placeholder="Status akan muncul di sini")
-
-    def process_with_status(audio):
-        if audio is None:
-            return None, "Error: Audio input kosong. Silakan rekam suara terlebih dahulu."
+            gr.Markdown("### Input Suara")
+            audio_input = gr.Audio(
+                sources="microphone", 
+                type="numpy", 
+                label="Rekam Pertanyaan"
+            )
+            submit_btn = gr.Button("Proses", variant="primary")
+            clear_btn = gr.Button("Bersihkan", variant="secondary")
         
-        try:
-            result = voice_chat(audio)
-            if result:
-                # Periksa file hasil sebelum mengembalikannya
-                if os.path.exists(result) and os.path.getsize(result) > 0:
-                    return result, "Success: Audio response diterima!"
-                else:
-                    return None, f"Error: File audio respons tidak valid. Path: {result}, Size: {os.path.getsize(result) if os.path.exists(result) else 'file tidak ada'}"
-            else:
-                return None, "Error: Gagal mendapatkan respons audio dari server."
-        except Exception as e:
-            import traceback
-            error_details = traceback.format_exc()
-            print(error_details)
-            return None, f"Error: {str(e)}"
-
+        # Panel output
+        with gr.Column():
+            gr.Markdown("### Respons Asisten")
+            audio_output = gr.Audio(type="filepath", label="Respons Suara", autoplay=True)
+            transcript_box = gr.Textbox(label="Input Anda (Speech-to-Text)", lines=3)
+            response_box = gr.Textbox(label="Respons AI", lines=3)
+            status_box = gr.Textbox(label="Status", value="Siap digunakan")
+    
+    gr.Markdown("### Petunjuk Penggunaan")
+    gr.Markdown("""
+    1. Klik tombol mikrofon untuk mulai merekam
+    2. Bicarakan pertanyaan atau instruksi Anda
+    3. Klik tombol stop untuk mengakhiri rekaman
+    4. Klik tombol "Proses" untuk mengirim audio
+    5. Tunggu beberapa saat untuk mendapatkan respons
+    """)
+    
+    # Event handlers
     submit_btn.click(
-        fn=process_with_status,
-        inputs=audio_input,
-        outputs=[audio_output, error_output]
+        fn=voice_chat,
+        inputs=[audio_input],
+        outputs=[audio_output, transcript_box, response_box]
+    )
+    
+    # Clear handler
+    def clear_outputs():
+        return None, "", "", "Input dan output dibersihkan"
+    
+    clear_btn.click(
+        fn=clear_outputs,
+        inputs=[],
+        outputs=[audio_output, transcript_box, response_box, status_box]
+    )
+    
+    # Set status when audio is recorded
+    def update_status(audio):
+        if audio is not None:
+            return "Audio terekam, siap untuk diproses"
+        return "Tidak ada audio yang terekam"
+    
+    audio_input.change(
+        fn=update_status,
+        inputs=[audio_input],
+        outputs=[status_box]
     )
 
 if __name__ == "__main__":
     # Buat folder output jika belum ada
-    output_dir = os.path.join(tempfile.gettempdir(), "gradio_outputs")
+    output_dir = os.path.join(tempfile.gettempdir(), "voice_chat_output")
     os.makedirs(output_dir, exist_ok=True)
     
-    # Tambahkan server_name dan server_port untuk lebih konsisten
+    # Jalankan aplikasi
     demo.launch(server_name="127.0.0.1", server_port=7860)
