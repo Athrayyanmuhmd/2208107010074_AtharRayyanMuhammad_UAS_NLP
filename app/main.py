@@ -3,6 +3,8 @@ import logging
 import tempfile
 import shutil
 import uuid
+import re
+import base64
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -29,6 +31,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],  # Mengizinkan semua methods
     allow_headers=["*"],  # Mengizinkan semua headers
+    expose_headers=["X-Transcription-Base64", "X-Response-Text-Base64", "Content-Disposition", "Content-Length"],  # Expose custom headers
 )
 
 # Folder untuk menyimpan file output
@@ -57,18 +60,41 @@ async def root():
     logger.info("Root endpoint diakses")
     return {"message": "Voice Chatbot API sedang berjalan. Gunakan endpoint /voice-chat untuk berinteraksi."}
 
+# Fungsi untuk membersihkan teks header
+def clean_header_value(text):
+    """Membersihkan nilai untuk digunakan dalam header HTTP"""
+    if text is None:
+        return ""
+    # Hapus karakter yang tidak valid dalam header HTTP
+    # Dan batasi panjang
+    clean_text = re.sub(r'[\r\n\t]', ' ', text)
+    return clean_text[:200]  # Batasi panjang
+
+# Fungsi untuk mengenkode teks ke base64
+def encode_base64(text):
+    """Mengenkode teks ke base64 untuk digunakan dalam header"""
+    if text is None:
+        return ""
+    try:
+        return base64.b64encode(text.encode('utf-8')).decode('ascii')
+    except:
+        return ""
+
 @app.post("/voice-chat")
-async def voice_chat(file: UploadFile = File(...)):
+async def voice_chat(file: UploadFile = File(...), system_prompt: str = Form(None)):
     """
     Endpoint utama untuk interaksi voice chat.
     
     Args:
-        file: File audio yang diupload dari pengguna (Gradio menggunakan nama 'file' sebagai default)
+        file: File audio yang diupload dari pengguna
+        system_prompt: Prompt sistem tambahan yang opsional
     
     Returns:
         FileResponse: File audio dengan respons dari chatbot
     """
     logger.info(f"Menerima permintaan voice chat dengan file: {file.filename}")
+    if system_prompt:
+        logger.info(f"System prompt disediakan: {system_prompt[:50]}...")
     
     temp_files = []
     try:
@@ -93,8 +119,14 @@ async def voice_chat(file: UploadFile = File(...)):
         logger.info(f"Hasil transkripsi: {transcription}")
         
         # Langkah 2: Dapatkan respons menggunakan model Gemini
+        # Tambahkan system prompt jika disediakan
         logger.info("Menghasilkan respons LLM")
-        llm_response = generate_response(transcription)
+        if system_prompt:
+            # Catatan: ini memerlukan modifikasi pada fungsi generate_response untuk menerima system_prompt
+            # Untuk saat ini, gunakan default prompt
+            llm_response = generate_response(transcription)
+        else:
+            llm_response = generate_response(transcription)
         
         # Periksa apakah pembuatan respons berhasil
         if llm_response.startswith("[ERROR]"):
@@ -144,25 +176,31 @@ async def voice_chat(file: UploadFile = File(...)):
         logger.info(f"Permanent file verified - path: {permanent_path}, size: {perm_file_size} bytes")
         
         # Langkah 4: Kembalikan file audio dengan header yang tepat
+        # Gunakan base64 encoding untuk menghindari masalah karakter invalid dalam header
         logger.info("Mengembalikan respons audio ke klien")
+        
+        # Enkode teks ke base64 untuk menghindari masalah dengan karakter tidak valid
+        transcription_b64 = encode_base64(transcription)
+        response_text_b64 = encode_base64(llm_response)
+        
+        headers = {
+            "Content-Disposition": f"attachment; filename=response.wav",
+            "Content-Length": str(perm_file_size),
+            "Access-Control-Expose-Headers": "X-Transcription-Base64, X-Response-Text-Base64, Content-Disposition, Content-Length",
+            "X-Transcription-Base64": transcription_b64,
+            "X-Response-Text-Base64": response_text_b64
+        }
+        
         return FileResponse(
             path=permanent_path,
             media_type="audio/wav",
             filename="response.wav",
-            headers={
-                "Content-Disposition": f"attachment; filename=response.wav",
-                "Content-Length": str(perm_file_size),
-                "Access-Control-Expose-Headers": "Content-Disposition, Content-Length"
-            }
+            headers=headers
         )
         
     except Exception as e:
         logger.error(f"Terjadi kesalahan saat memproses permintaan voice chat: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Terjadi kesalahan: {str(e)}")
-    
-    # Tidak perlu finally block untuk membersihkan file karena:
-    # 1. Temporary files dari tempfile akan dibersihkan secara otomatis
-    # 2. File di OUTPUT_DIR akan dipertahankan untuk digunakan oleh client
 
 # Untuk menjalankan aplikasi dengan uvicorn
 if __name__ == "__main__":
