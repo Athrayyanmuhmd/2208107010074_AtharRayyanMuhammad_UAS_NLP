@@ -572,11 +572,10 @@ with gr.Blocks(title="Voice Chatbot AI", css=custom_css) as demo:
     )
 
 if __name__ == "__main__":
-    # Buat folder output jika belum ada
+
     output_dir = os.path.join(tempfile.gettempdir(), "voice_chat_output")
     os.makedirs(output_dir, exist_ok=True)
-    
-    # Jalankan aplikasi
+
     demo.launch(
         server_name="127.0.0.1", 
         server_port=7860
